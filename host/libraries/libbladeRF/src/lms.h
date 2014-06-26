@@ -105,6 +105,19 @@ struct lms_xcvr_config {
     lms_bw rx_bw;                       /**< Receive Bandwidth */
 };
 
+struct lms_dc_reg_vals {
+    uint8_t lpf_tuning;
+    uint8_t tx_lpf_i;
+    uint8_t tx_lpf_q;
+    uint8_t rx_lpf_i;
+    uint8_t rx_lpf_q;
+    uint8_t dc_ref;
+    uint8_t rxvga2a_i;
+    uint8_t rxvga2a_q;
+    uint8_t rxvga2b_i;
+    uint8_t rxvga2b_q;
+};
+
 /**
  * Convert an integer to a bandwidth selection.
  * If the actual bandwidth is not available, the closest
@@ -243,6 +256,16 @@ int lms_lna_get_gain(struct bladerf *dev, bladerf_lna_gain *gain);
  * @return 0 on success, BLADERF_ERR_* value on failure
  */
 int lms_select_lna(struct bladerf *dev, lms_lna lna);
+
+/**
+ * Get the currently selected LNA
+ *
+ * @param[in]   dev    Device handle
+ * @param[out]  lna    Currently selected LNA, according to device registers
+ *
+ * @return 0 on success, BLADERF_ERR_* value on failure
+ */
+int lms_get_lna(struct bladerf *dev, lms_lna *lna);
 
 /**
  * Enable or disable RXVGA1
@@ -520,6 +543,24 @@ int lms_dump_registers(struct bladerf *dev);
  * @return 0 on success, -1 on failure.
  */
 int lms_calibrate_dc(struct bladerf *dev, bladerf_cal_module module);
+
+/**
+ * Load DC calibration values directly via device registers instead of
+ * running autocalibration routines.
+ *
+ * @param[in]   dev         Device handle
+ * @param[in]   dc_cals     Calibration values to load
+ */
+int lms_set_dc_cals(struct bladerf *dev,
+                    const struct bladerf_lms_dc_cals *dc_cals);
+
+/**
+ * Retrieve the DC calibration values currently in use
+ *
+ * @param[in]   dev         Device handle
+ * @param[out]   dc_cals    Calibration values to load
+ */
+int lms_get_dc_cals(struct bladerf *dev, struct bladerf_lms_dc_cals *dc_cals);
 
 /**
  * Initialize and configure the LMS6002D given the transceiver

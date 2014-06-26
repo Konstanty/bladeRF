@@ -36,6 +36,7 @@
 #include "device_identifier.h"
 #include "version.h"       /* Generated at build time */
 #include "conversions.h"
+#include "dc_cal_table.h"
 
 /*------------------------------------------------------------------------------
  * Device discovery & initialization/deinitialization
@@ -434,6 +435,9 @@ int bladerf_set_frequency(struct bladerf *dev,
 {
     int status;
     bladerf_xb attached;
+    int16_t dc_i, dc_q;
+    const struct dc_cal_tbl *dc_cal =
+        (module == BLADERF_MODULE_RX) ? dev->cal.dc_rx : dev->cal.dc_tx;
 
     status = bladerf_expansion_get_attached(dev, &attached);
     if (status)
@@ -454,9 +458,33 @@ int bladerf_set_frequency(struct bladerf *dev,
     status = lms_set_frequency(dev, module, frequency);
     if (status != 0) {
         return status;
-    } else {
-        return bladerf_select_band(dev, module, frequency);
     }
+
+    status = bladerf_select_band(dev, module, frequency);
+    if (status != 0) {
+        return status;
+    }
+
+    if (dc_cal != NULL) {
+        dc_cal_tbl_vals(dc_cal, frequency, &dc_i, &dc_q);
+
+        status = dev->fn->set_correction(dev, module,
+                                         BLADERF_CORR_LMS_DCOFF_I, dc_i);
+        if (status != 0) {
+            return status;
+        }
+
+        status = dev->fn->set_correction(dev, module,
+                                         BLADERF_CORR_LMS_DCOFF_Q, dc_q);
+        if (status != 0) {
+            return status;
+        }
+
+        log_verbose("Set %s DC offset cal (I, Q) to: (%d, %d)\n",
+                    (module == BLADERF_MODULE_RX) ? "RX" : "TX", dc_i, dc_q);
+    }
+
+    return status;
 }
 
 int bladerf_get_frequency(struct bladerf *dev,
@@ -897,7 +925,7 @@ int bladerf_si5338_write(struct bladerf *dev, uint8_t address, uint8_t val)
 }
 
 /*------------------------------------------------------------------------------
- * LMS register read / write functions
+ * LMS register access and low-level functions
  *----------------------------------------------------------------------------*/
 
 int bladerf_lms_read(struct bladerf *dev, uint8_t address, uint8_t *val)
@@ -908,6 +936,18 @@ int bladerf_lms_read(struct bladerf *dev, uint8_t address, uint8_t *val)
 int bladerf_lms_write(struct bladerf *dev, uint8_t address, uint8_t val)
 {
     return dev->fn->lms_write(dev,address,val);
+}
+
+int bladerf_lms_set_dc_cals(struct bladerf *dev,
+                            const struct bladerf_lms_dc_cals *dc_cals)
+{
+    return lms_set_dc_cals(dev, dc_cals);
+}
+
+int bladerf_lms_get_dc_cals(struct bladerf *dev,
+                            struct bladerf_lms_dc_cals *dc_cals)
+{
+    return lms_get_dc_cals(dev, dc_cals);
 }
 
 /*------------------------------------------------------------------------------
@@ -976,6 +1016,99 @@ int bladerf_get_correction(struct bladerf *dev, bladerf_module module,
                            bladerf_correction corr, int16_t *value)
 {
     return dev->fn->get_correction(dev, module, corr, value);
+}
+
+int bladerf_load_calibration_table(struct bladerf *dev, const char *filename)
+{
+    int status;
+    struct bladerf_image *image = NULL;
+    struct dc_cal_tbl *dc_tbl = NULL;
+
+    if (filename == NULL) {
+        memset(&dev->cal, 0, sizeof(dev->cal));
+        return 0;
+    }
+
+    image = bladerf_alloc_image(BLADERF_IMAGE_TYPE_INVALID, 0xffffffff, 0);
+    if (image == NULL) {
+        return BLADERF_ERR_MEM;
+    }
+
+    status = bladerf_image_read(image, filename);
+    if (status == 0) {
+
+        if (image->type == BLADERF_IMAGE_TYPE_RX_DC_CAL ||
+            image->type == BLADERF_IMAGE_TYPE_TX_DC_CAL) {
+
+            bladerf_module module;
+            unsigned int frequency;
+
+            dc_tbl = dc_cal_tbl_load(image->data, image->length);
+
+            if (dc_tbl == NULL) {
+                status = BLADERF_ERR_MEM;
+                goto out;
+            }
+
+            /* This appears to always come back as 23, so there should be
+             * no harm in setting it twice on both RX and TX. Warn if this
+             * assumption does not hold. */
+            if (dc_tbl->reg_vals.lpf_tuning != 23) {
+                log_warning("Table contains unexpected LPF tuning value: %d\n");
+            }
+
+            if (image->type == BLADERF_IMAGE_TYPE_RX_DC_CAL) {
+                free(dev->cal.dc_rx);
+                module = BLADERF_MODULE_RX;
+
+                dev->cal.dc_rx = dc_tbl;
+                dev->cal.dc_rx->reg_vals.tx_lpf_i = -1;
+                dev->cal.dc_rx->reg_vals.tx_lpf_q = -1;
+            } else {
+                free(dev->cal.dc_tx);
+                module = BLADERF_MODULE_TX;
+
+                dev->cal.dc_tx = dc_tbl;
+                dev->cal.dc_tx->reg_vals.rx_lpf_i = -1;
+                dev->cal.dc_tx->reg_vals.rx_lpf_q = -1;
+                dev->cal.dc_tx->reg_vals.dc_ref = -1;
+                dev->cal.dc_tx->reg_vals.rxvga2a_i = -1;
+                dev->cal.dc_tx->reg_vals.rxvga2a_q = -1;
+                dev->cal.dc_tx->reg_vals.rxvga2b_i = -1;
+                dev->cal.dc_tx->reg_vals.rxvga2b_q = -1;
+            }
+
+            status = lms_set_dc_cals(dev, &dc_tbl->reg_vals);
+            if (status != 0) {
+                goto out;
+            }
+
+            /* Reset the module's frequency to kick off the application of the
+             * new table entries */
+            status = bladerf_get_frequency(dev, module, &frequency);
+            if (status != 0) {
+                goto out;
+            }
+
+            status = bladerf_set_frequency(dev, module, frequency);
+
+
+        } else if (image->type == BLADERF_IMAGE_TYPE_RX_IQ_CAL ||
+                   image->type == BLADERF_IMAGE_TYPE_TX_IQ_CAL) {
+
+            /* TODO: Not implemented */
+            status = BLADERF_ERR_UNSUPPORTED;
+            goto out;
+        } else {
+            status = BLADERF_ERR_INVAL;
+            log_debug("%s loaded nexpected image type: %d\n",
+                      __FUNCTION__, image->type);
+        }
+    }
+
+out:
+    bladerf_free_image(image);
+    return status;
 }
 
 /*------------------------------------------------------------------------------

@@ -28,6 +28,7 @@
 #include "bladeRF.h"
 #include "lms.h"
 #include "log.h"
+#include "dc_cal_table.h"
 
 #define OTP_BUFFER_SIZE 256
 
@@ -124,7 +125,7 @@ int bladerf_init_device(struct bladerf *dev)
             return status;
         }
 
-        /* Set a default saplerate */
+        /* Set a default samplerate */
         status = bladerf_set_sample_rate(dev, BLADERF_MODULE_TX, 1000000, NULL);
         if (status != 0) {
             return status;
